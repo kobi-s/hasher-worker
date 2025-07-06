@@ -77,10 +77,10 @@ class HashcatConfig:
     binary_path: str
     hash_file: str
     wordlist_file: str
-    rule_file: Optional[str] = None
     hash_type: str
-    additional_flags: List[str]
     output_file: str
+    rule_file: Optional[str] = None
+    additional_flags: List[str] = None
 
 class HashcatWorker:
     """Main worker class for handling hashcat operations."""
@@ -138,10 +138,10 @@ class HashcatWorker:
                 binary_path=config_data['hashcat_binary'],
                 hash_file=config_data['hash_file'],
                 wordlist_file=config_data['wordlist_file'],
-                rule_file=config_data.get('rule_file'),
                 hash_type=config_data['hash_type'],
-                additional_flags=config_data.get('additional_flags', []),
-                output_file=config_data['output_file']
+                output_file=config_data['output_file'],
+                rule_file=config_data.get('rule_file'),
+                additional_flags=config_data.get('additional_flags', [])
             )
         except Exception as e:
             self.logger.error(f"Error reading hashcat config: {str(e)}")
@@ -161,7 +161,8 @@ class HashcatWorker:
                 cmd.extend(['-r', config.rule_file])
             
             # Add additional flags
-            cmd.extend(config.additional_flags)
+            if config.additional_flags:
+                cmd.extend(config.additional_flags)
             
             # Add output file
             cmd.extend(['-o', config.output_file])
