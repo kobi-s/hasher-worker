@@ -1,0 +1,18 @@
+{
+  "hashcat_binary": "/usr/bin/hashcat",
+  "hash_file": "hashes.txt",
+  "wordlist_file": "wordlist.txt",
+  "rule_file": "rules.txt",
+  "hash_type": "0",
+  "additional_flags": [
+    "--force",
+    "--status",
+    "--status-timer=10"
+  ],
+  "download_urls": [
+    "https://example.com/hashes.txt",
+    "https://example.com/wordlist.txt",
+    "https://example.com/rules.txt"
+  ],
+  "output_file": "cracked.txt"
+} 
