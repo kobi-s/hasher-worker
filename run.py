@@ -555,7 +555,7 @@ def main():
     # Auto-start campaign if requested
     if args.auto_start:
         async def auto_start_campaign():
-            await asyncio.sleep(2)  # Wait for server to start
+            await asyncio.sleep(10)  # Wait for server to start
             config_file = "campaign-config.json"
             if os.path.exists(config_file):
                 logger.info("Auto-starting campaign processing...")
