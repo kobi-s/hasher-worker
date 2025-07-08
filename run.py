@@ -246,37 +246,6 @@ class HashcatWorker:
             self.logger.error(f"Error reading campaign config: {str(e)}")
             raise
     
-    async def monitor_hashcat_process(self, config: CampaignConfig, process: asyncio.subprocess.Process):
-        """Monitor hashcat process and send status updates."""
-        try:
-            while process.returncode is None:
-                # Read status from hashcat's JSON output
-                if process.stdout:
-                    try:
-                        line = await asyncio.wait_for(process.stdout.readline(), timeout=1.0)
-                        if line:
-                            status_line = line.decode('utf-8').strip()
-                            if status_line.startswith('{"status"'):
-                                try:
-                                    status_data = json.loads(status_line)
-                                    await self.send_status_to_control_server(config, status_data)
-                                except json.JSONDecodeError:
-                                    self.logger.warning(f"Invalid JSON status line: {status_line}")
-                    except asyncio.TimeoutError:
-                        continue
-                
-                await asyncio.sleep(config.statusTimer)
-            
-            # Send final status
-            final_status = {
-                "status": "completed" if process.returncode == 0 else "failed",
-                "return_code": process.returncode
-            }
-            await self.send_status_to_control_server(config, final_status)
-            
-        except Exception as e:
-            self.logger.error(f"Error monitoring hashcat process: {str(e)}")
-    
     async def execute_hashcat(self, config: CampaignConfig, downloaded_files: Dict[str, str]) -> Dict[str, Any]:
         """Execute hashcat with the campaign configuration."""
         try:
@@ -329,26 +298,58 @@ class HashcatWorker:
                 stderr=asyncio.subprocess.PIPE
             )
             
-            # Start monitoring task
-            self.status_task = asyncio.create_task(
-                self.monitor_hashcat_process(config, self.current_process)
-            )
+            # Send initial status
+            await self.send_status_to_control_server(config, {
+                "status": "running",
+                "message": "Hashcat process started"
+            })
             
-            # Wait for process to complete
-            stdout, stderr = await self.current_process.communicate()
+            # Read stdout and stderr while process is running
+            stdout_lines = []
+            stderr_lines = []
             
-            # Cancel monitoring task
-            if self.status_task:
-                self.status_task.cancel()
-                try:
-                    await self.status_task
-                except asyncio.CancelledError:
-                    pass
+            while self.current_process.returncode is None:
+                # Read stdout
+                if self.current_process.stdout:
+                    try:
+                        line = await asyncio.wait_for(self.current_process.stdout.readline(), timeout=0.1)
+                        if line:
+                            line_str = line.decode('utf-8').strip()
+                            stdout_lines.append(line_str)
+                            
+                            # Check for JSON status lines
+                            if line_str.startswith('{"status"'):
+                                try:
+                                    status_data = json.loads(line_str)
+                                    await self.send_status_to_control_server(config, status_data)
+                                except json.JSONDecodeError:
+                                    self.logger.warning(f"Invalid JSON status line: {line_str}")
+                    except asyncio.TimeoutError:
+                        pass
+                
+                # Read stderr
+                if self.current_process.stderr:
+                    try:
+                        line = await asyncio.wait_for(self.current_process.stderr.readline(), timeout=0.1)
+                        if line:
+                            stderr_lines.append(line.decode('utf-8').strip())
+                    except asyncio.TimeoutError:
+                        pass
+                
+                # Small delay to prevent busy waiting
+                await asyncio.sleep(0.1)
+            
+            # Send final status
+            final_status = {
+                "status": "completed" if self.current_process.returncode == 0 else "failed",
+                "return_code": self.current_process.returncode
+            }
+            await self.send_status_to_control_server(config, final_status)
             
             result = {
                 'return_code': self.current_process.returncode,
-                'stdout': stdout.decode('utf-8') if stdout else '',
-                'stderr': stderr.decode('utf-8') if stderr else '',
+                'stdout': '\n'.join(stdout_lines),
+                'stderr': '\n'.join(stderr_lines),
                 'command': ' '.join(cmd)
             }
             
