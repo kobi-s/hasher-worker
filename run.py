@@ -259,7 +259,7 @@ class HashcatWorker:
 
             async with aiohttp.ClientSession() as session:
                 async with session.post(url, json=payload) as response:
-                    if response.status == 200:
+                    if response.status == 201:
                         self.logger.info(f"Status sent to control server: {status_data.get('status', 'unknown')}")
                     else:
                         self.logger.warning(f"Failed to send status to control server: {response.status}")
@@ -286,7 +286,7 @@ class HashcatWorker:
             
             async with aiohttp.ClientSession() as session:
                 async with session.post(url, json=payload) as response:
-                    if response.status == 200:
+                    if response.status == 201:
                         self.logger.info(f"Progress sent to control server")
                     else:
                         self.logger.warning(f"Failed to send progress to control server: {response.status}")
@@ -571,7 +571,6 @@ class HashcatWorker:
             total_hashes = self.last_recovered_hashes[1] if self.last_recovered_hashes else 0
             
             self.logger.info(f"Sending {len(cracked_hashes)} cracked hashes to control server (newly recovered: {newly_recovered_count})")
-            self.logger.debug(f"Potfile content preview: {potfile_content[:200]}...")
             
             # Handle webhook URLs properly
             if config.controlServer.startswith('https://'):
@@ -598,7 +597,7 @@ class HashcatWorker:
 
             async with aiohttp.ClientSession() as session:
                 async with session.post(url, json=payload) as response:
-                    if response.status == 200:
+                    if response.status == 201:
                         self.logger.info(f"Cracked hashes sent successfully: {len(cracked_hashes)} hashes")
                     else:
                         self.logger.warning(f"Failed to send cracked hashes: {response.status}")
@@ -670,7 +669,7 @@ class HashcatWorker:
 
             async with aiohttp.ClientSession() as session:
                 async with session.post(url, json=payload) as response:
-                    if response.status == 200:
+                    if response.status == 201:
                         self.logger.info(f"Final cracked hashes sent successfully: {len(cracked_hashes)} hashes")
                     else:
                         self.logger.warning(f"Failed to send final cracked hashes: {response.status}")
