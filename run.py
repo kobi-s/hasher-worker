@@ -422,17 +422,27 @@ class HashcatWorker:
             }
             await self.send_status_to_control_server(config, final_status)
             
+            # If campaign completed successfully and potfile exists, send the cracked hashes
+            if self.current_process.returncode == 0:
+                self.logger.info("Hashcat execution completed successfully")
+                
+                # Check if potfile exists and send cracked hashes
+                potfile_path = Path(config.potfilePath)
+                if potfile_path.exists():
+                    self.logger.info(f"Campaign completed successfully. Sending final cracked hashes from potfile: {config.potfilePath}")
+                    # Send with 0 newly recovered count since this is the final send
+                    await self.send_cracked_hashes(config, 0)
+                else:
+                    self.logger.info("Campaign completed successfully but no potfile found")
+            else:
+                self.logger.warning(f"Hashcat execution completed with return code {self.current_process.returncode}")
+            
             result = {
                 'return_code': self.current_process.returncode,
                 'stdout': '\n'.join(stdout_lines),
                 'stderr': '\n'.join(stderr_lines),
                 'command': ' '.join(cmd)
             }
-            
-            if self.current_process.returncode == 0:
-                self.logger.info("Hashcat execution completed successfully")
-            else:
-                self.logger.warning(f"Hashcat execution completed with return code {self.current_process.returncode}")
             
             return result
             
@@ -551,7 +561,14 @@ class HashcatWorker:
             total_recovered = self.last_recovered_hashes[0] if self.last_recovered_hashes else 0
             total_hashes = self.last_recovered_hashes[1] if self.last_recovered_hashes else 0
             
-            self.logger.info(f"Sending {len(cracked_hashes)} cracked hashes to control server (newly recovered: {newly_recovered_count})")
+            # Determine if this is a final completion send or real-time recovery
+            is_final_send = newly_recovered_count == 0
+            
+            if is_final_send:
+                self.logger.info(f"Sending final cracked hashes from completed campaign: {len(cracked_hashes)} hashes")
+            else:
+                self.logger.info(f"Sending {len(cracked_hashes)} cracked hashes to control server (newly recovered: {newly_recovered_count})")
+            
             self.logger.debug(f"Potfile content preview: {potfile_content[:200]}...")
             
             # Handle webhook URLs properly
@@ -560,11 +577,14 @@ class HashcatWorker:
             else:
                 url = f"https://{config.controlServer}/api/worker-logs"
 
+            # Determine the appropriate status based on whether this is final send or real-time recovery
+            status_type = "campaign_completed" if is_final_send else "sending_cracked_hashes"
+
             payload = {
                 "campaignId": config.campaignId,
                 "instanceId": AWS_INSTANCE_ID,
                 "timestamp": datetime.now().isoformat(),
-                "status": {"status": "sending_cracked_hashes"},  # Status indicating we're sending cracked hashes
+                "status": {"status": status_type},  # Status indicating the type of send
                 "hashcatStatus": {
                     "newly_recovered_count": newly_recovered_count,
                     "total_recovered": total_recovered,
@@ -574,14 +594,18 @@ class HashcatWorker:
                     "potfile_path": str(potfile_path),
                     "algorithm": config.hashTypeName,
                     "wordlist": config.wordlist,
-                    "hash_type": config.hashType
+                    "hash_type": config.hashType,
+                    "is_final_send": is_final_send
                 }
             }
 
             async with aiohttp.ClientSession() as session:
                 async with session.post(url, json=payload) as response:
                     if response.status == 200:
-                        self.logger.info(f"Cracked hashes sent successfully: {len(cracked_hashes)} hashes")
+                        if is_final_send:
+                            self.logger.info(f"Final cracked hashes sent successfully: {len(cracked_hashes)} hashes")
+                        else:
+                            self.logger.info(f"Cracked hashes sent successfully: {len(cracked_hashes)} hashes")
                     else:
                         self.logger.warning(f"Failed to send cracked hashes: {response.status}")
 
