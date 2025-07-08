@@ -39,4 +39,4 @@ fi
 
 # Start the server
 echo "Starting server on port 4444..."
-python3 run.py --host 0.0.0.0 --port 4444 
+python3 run.py --auto-start --host 0.0.0.0 --port 4444 

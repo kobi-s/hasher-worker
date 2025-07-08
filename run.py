@@ -147,46 +147,69 @@ class HashcatWorker:
             raise
     
     async def download_campaign_files(self, config: CampaignConfig) -> Dict[str, str]:
-        """Download all files required for the campaign."""
-        downloaded_files = {}
-        
-        # Download hash file
-        hash_filename = f"hashes_{config.campaignId}.txt"
-        hash_path = await self.download_file(config.hashFile.location, hash_filename)
-        downloaded_files['hash_file'] = hash_path
-        
-        # Download wordlist (assuming it's a URL - you may need to adjust this)
-        # For now, we'll assume the wordlist is already available or needs to be downloaded separately
-        wordlist_filename = f"wordlist_{config.wordlist}.txt"
-        # You'll need to implement wordlist download logic based on your system
-        downloaded_files['wordlist_file'] = f"wordlists/{wordlist_filename}"  # Placeholder
-        
-        # Download rule files
-        rule_files = []
-        for rule_file in config.ruleFiles:
-            rule_path = await self.download_file(rule_file.location, rule_file.filename)
-            rule_files.append(rule_path)
-        downloaded_files['rule_files'] = rule_files
-        
-        return downloaded_files
-    
-    def read_campaign_config(self, config_file: str) -> CampaignConfig:
-        """Read and parse campaign configuration from JSON file."""
-        try:
-            with open(config_file, 'r') as f:
-                config_data = json.load(f)
+            """Download all files required for the campaign."""
+            downloaded_files = {}
             
-            self.logger.info(f"Loaded campaign configuration from {config_file}")
+            # Download hash file
+            hash_filename = f"hashes_{config.campaignId}.txt"
+            hash_path = await self.download_file(config.hashFile.location, hash_filename)
+            downloaded_files['hash_file'] = hash_path
             
-            return CampaignConfig(**config_data)
-        except Exception as e:
-            self.logger.error(f"Error reading campaign config: {str(e)}")
-            raise
-    
+            # Download wordlist files
+            wordlist_files = []
+            for wordlist_file in config.wordlistFiles:
+                wordlist_path = await self.download_file(wordlist_file.location, wordlist_file.filename)
+                wordlist_files.append(wordlist_path)
+            
+            # Use the first wordlist file as the main wordlist
+            if wordlist_files:
+                downloaded_files['wordlist_file'] = wordlist_files[0]
+            else:
+                # Fallback to the wordlist URL if no wordlistFiles are provided
+                wordlist_filename = f"wordlist_{config.campaignId}.txt"
+                wordlist_path = await self.download_file(config.wordlist, wordlist_filename)
+                downloaded_files['wordlist_file'] = wordlist_path
+            
+            # Download left wordlist files (for combination attack)
+            left_wordlist_files = []
+            for left_wordlist_file in config.leftWordlistFiles:
+                left_wordlist_path = await self.download_file(left_wordlist_file.location, left_wordlist_file.filename)
+                left_wordlist_files.append(left_wordlist_path)
+            
+            if left_wordlist_files:
+                downloaded_files['left_wordlist_files'] = left_wordlist_files
+                # Use the first left wordlist as the main left wordlist for attack mode 1
+                downloaded_files['wordlist_file2'] = left_wordlist_files[0]
+            
+            # Download right wordlist files (for combination attack)
+            right_wordlist_files = []
+            for right_wordlist_file in config.rightWordlistFiles:
+                right_wordlist_path = await self.download_file(right_wordlist_file.location, right_wordlist_file.filename)
+                right_wordlist_files.append(right_wordlist_path)
+            
+            if right_wordlist_files:
+                downloaded_files['right_wordlist_files'] = right_wordlist_files
+                # If we have right wordlists but no left wordlists, use the first right wordlist as wordlist_file2
+                if not left_wordlist_files:
+                    downloaded_files['wordlist_file2'] = right_wordlist_files[0]
+            
+            # Download rule files
+            rule_files = []
+            for rule_file in config.ruleFiles:
+                rule_path = await self.download_file(rule_file.location, rule_file.filename)
+                rule_files.append(rule_path)
+            downloaded_files['rule_files'] = rule_files
+            
+            return downloaded_files
+        
     async def send_status_to_control_server(self, config: CampaignConfig, status_data: Dict[str, Any]):
         """Send status update to the control server."""
         try:
-            url = f"http://{config.controlServer}:{config.controlPort}/status"
+            # Handle webhook URLs properly
+            if config.controlServer.startswith('https://'):
+                url = config.controlServer
+            else:
+                url = f"http://{config.controlServer}:{config.controlPort}/status"
             
             payload = {
                 "campaignId": config.campaignId,
@@ -203,6 +226,19 @@ class HashcatWorker:
                         
         except Exception as e:
             self.logger.error(f"Error sending status to control server: {str(e)}")
+
+    def read_campaign_config(self, config_file: str) -> CampaignConfig:
+        """Read and parse campaign configuration from JSON file."""
+        try:
+            with open(config_file, 'r') as f:
+                config_data = json.load(f)
+            
+            self.logger.info(f"Loaded campaign configuration from {config_file}")
+            
+            return CampaignConfig(**config_data)
+        except Exception as e:
+            self.logger.error(f"Error reading campaign config: {str(e)}")
+            raise
     
     async def monitor_hashcat_process(self, config: CampaignConfig, process: asyncio.subprocess.Process):
         """Monitor hashcat process and send status updates."""
