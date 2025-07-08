@@ -55,6 +55,28 @@ logger = setup_logging()
 # Global config file path (will be set by command line arguments)
 CONFIG_FILE_PATH = "/home/ubuntu/campaigns/campaign-config.json"
 
+# Global variable to store AWS instance ID
+AWS_INSTANCE_ID = None
+
+async def fetch_aws_instance_id():
+    """Fetch AWS instance ID from metadata service."""
+    global AWS_INSTANCE_ID
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get('http://169.254.169.254/latest/meta-data/instance-id') as response:
+                if response.status == 200:
+                    AWS_INSTANCE_ID = await response.text()
+                    logger.info(f"Fetched AWS instance ID: {AWS_INSTANCE_ID}")
+                    return AWS_INSTANCE_ID
+                else:
+                    logger.warning(f"Failed to fetch AWS instance ID: {response.status}")
+                    AWS_INSTANCE_ID = "unknown"
+                    return AWS_INSTANCE_ID
+    except Exception as e:
+        logger.warning(f"Error fetching AWS instance ID: {str(e)}")
+        AWS_INSTANCE_ID = "unknown"
+        return AWS_INSTANCE_ID
+
 # Pydantic models for campaign configuration
 class HashFile(BaseModel):
     bucket: str
@@ -219,6 +241,7 @@ class HashcatWorker:
             
             payload = {
                 "campaignId": config.campaignId,
+                "instanceId": AWS_INSTANCE_ID,
                 "timestamp": datetime.now().isoformat(),
                 "status": status_data
             }
@@ -232,6 +255,32 @@ class HashcatWorker:
                         
         except Exception as e:
             self.logger.error(f"Error sending status to control server: {str(e)}")
+
+    async def send_progress_to_control_server(self, config: CampaignConfig, progress_data: Dict[str, Any]):
+        """Send progress update to the control server."""
+        try:
+            # Handle webhook URLs properly
+            if config.controlServer.startswith('https://'):
+                url = config.controlServer
+            else:
+                url = f"https://{config.controlServer}:{config.controlPort}/progress"
+            
+            payload = {
+                "campaignId": config.campaignId,
+                "instanceId": AWS_INSTANCE_ID,
+                "timestamp": datetime.now().isoformat(),
+                "progress": progress_data
+            }
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, json=payload) as response:
+                    if response.status == 200:
+                        self.logger.info(f"Progress sent to control server")
+                    else:
+                        self.logger.warning(f"Failed to send progress to control server: {response.status}")
+                        
+        except Exception as e:
+            self.logger.error(f"Error sending progress to control server: {str(e)}")
 
     def read_campaign_config(self, config_file: str) -> CampaignConfig:
         """Read and parse campaign configuration from JSON file."""
@@ -322,6 +371,8 @@ class HashcatWorker:
                                 try:
                                     status_data = json.loads(line_str)
                                     await self.send_status_to_control_server(config, status_data)
+                                    # Also send as progress update
+                                    await self.send_progress_to_control_server(config, status_data)
                                 except json.JSONDecodeError:
                                     self.logger.warning(f"Invalid JSON status line: {line_str}")
                     except asyncio.TimeoutError:
@@ -421,6 +472,9 @@ async def startup_event():
     logger.info("Hashcat Worker Server starting up...")
     logger.info(f"Working directory: {worker.work_dir}")
     logger.info(f"Download directory: {worker.download_dir}")
+    
+    # Fetch AWS instance ID
+    await fetch_aws_instance_id()
     
     # Auto-start campaign if requested
     if AUTO_START_REQUESTED:
@@ -541,6 +595,7 @@ async def health_check():
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
         "service": "Hashcat Worker Server",
+        "instance_id": AWS_INSTANCE_ID,
         "process_running": worker.current_process is not None and worker.current_process.returncode is None
     })
 
