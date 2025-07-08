@@ -408,12 +408,28 @@ app = FastAPI(
 # Initialize worker
 worker = HashcatWorker()
 
+# Global variable to track if auto-start is requested
+AUTO_START_REQUESTED = False
+
 @app.on_event("startup")
 async def startup_event():
     """Application startup event."""
     logger.info("Hashcat Worker Server starting up...")
     logger.info(f"Working directory: {worker.work_dir}")
     logger.info(f"Download directory: {worker.download_dir}")
+    
+    # Auto-start campaign if requested
+    if AUTO_START_REQUESTED:
+        async def auto_start_campaign():
+            await asyncio.sleep(2)  # Wait for server to start
+            if os.path.exists(CONFIG_FILE_PATH):
+                logger.info(f"Auto-starting campaign processing from {CONFIG_FILE_PATH}")
+                await worker.process_campaign(CONFIG_FILE_PATH)
+            else:
+                logger.error(f"Config file not found: {CONFIG_FILE_PATH}")
+        
+        # Schedule auto-start
+        asyncio.create_task(auto_start_campaign())
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -565,16 +581,8 @@ def main():
     
     # Auto-start campaign if requested
     if args.auto_start:
-        async def auto_start_campaign():
-            await asyncio.sleep(2)  # Wait for server to start
-            if os.path.exists(args.config):
-                logger.info(f"Auto-starting campaign processing from {args.config}")
-                await worker.process_campaign(args.config)
-            else:
-                logger.error(f"Config file not found: {args.config}")
-        
-        # Schedule auto-start
-        asyncio.create_task(auto_start_campaign())
+        global AUTO_START_REQUESTED
+        AUTO_START_REQUESTED = True
     
     uvicorn.run(
         "run:app",
