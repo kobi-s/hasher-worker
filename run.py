@@ -387,7 +387,7 @@ class HashcatWorker:
                                 hashcat_status_data = json.loads(line_str)
                                 
                                 # Check for new recovered hashes
-                                new_recovered_hashes = self.check_for_new_recovered_hashes(hashcat_status_data)
+                                newly_recovered_count = self.check_for_new_recovered_hashes(hashcat_status_data)
                                 
                                 # Send regular status update
                                 await self.send_status_to_control_server(
@@ -398,8 +398,8 @@ class HashcatWorker:
                                 await self.send_progress_to_control_server(config, hashcat_status_data)
                                 
                                 # Send hash recovery notification if new hashes were found
-                                if new_recovered_hashes:
-                                    await self.send_hash_recovery_notification(config, new_recovered_hashes)
+                                if newly_recovered_count > 0:
+                                    await self.send_hash_recovery_notification(config, newly_recovered_count)
                     except asyncio.TimeoutError:
                         pass
                 
@@ -481,10 +481,10 @@ class HashcatWorker:
                 'config_file': config_file
             }
 
-    async def send_hash_recovery_notification(self, config: CampaignConfig, recovered_hashes: List[int]):
+    async def send_hash_recovery_notification(self, config: CampaignConfig, newly_recovered_count: int):
         """Send notification to control server about newly recovered hashes."""
         try:
-            self.logger.info(f"New hashes recovered! Hash indices: {recovered_hashes}")
+            self.logger.info(f"New hashes recovered! Count: {newly_recovered_count}")
             
             # Handle webhook URLs properly
             if config.controlServer.startswith('https://'):
@@ -498,24 +498,26 @@ class HashcatWorker:
                 "timestamp": datetime.now().isoformat(),
                 "status": {"status": "hash_recovered"},  # Special status for hash recovery
                 "hashcatStatus": {
-                    "recovered_hashes": recovered_hashes
+                    "newly_recovered_count": newly_recovered_count,
+                    "total_recovered": self.last_recovered_hashes[0] if self.last_recovered_hashes else 0,
+                    "total_hashes": self.last_recovered_hashes[1] if self.last_recovered_hashes else 0
                 }
             }
 
             async with aiohttp.ClientSession() as session:
                 async with session.post(url, json=payload) as response:
                     if response.status == 201:
-                        self.logger.info(f"Hash recovery notification sent successfully: {len(recovered_hashes)} hashes recovered")
+                        self.logger.info(f"Hash recovery notification sent successfully: {newly_recovered_count} hashes recovered")
                         
                         # After sending hash recovery notification, send the actual cracked hashes
-                        await self.send_cracked_hashes(config, recovered_hashes)
+                        await self.send_cracked_hashes(config, newly_recovered_count)
                     else:
                         self.logger.warning(f"Failed to send hash recovery notification: {response.status}")
 
         except Exception as e:
             self.logger.error(f"Error sending hash recovery notification: {str(e)}")
 
-    async def send_cracked_hashes(self, config: CampaignConfig, recovered_hashes: List[int]):
+    async def send_cracked_hashes(self, config: CampaignConfig, newly_recovered_count: int):
         """Send the actual cracked hashes from the potfile to the control server."""
         try:
             # Check if potfile exists and has content
@@ -532,12 +534,11 @@ class HashcatWorker:
                 self.logger.info("Potfile is empty, no hashes to send")
                 return
             
-            # Split content into lines and filter for the recovered hash indices
+            # Split content into lines
             potfile_lines = potfile_content.split('\n')
             cracked_hashes = []
             
-            # For now, send all cracked hashes from the potfile
-            # In a more sophisticated implementation, you might want to filter by hash index
+            # Get all cracked hashes from the potfile
             for line in potfile_lines:
                 if line.strip():  # Skip empty lines
                     cracked_hashes.append(line.strip())
@@ -546,11 +547,11 @@ class HashcatWorker:
                 self.logger.info("No cracked hashes found in potfile")
                 return
             
-            # Validate that we have the expected number of hashes
-            if len(cracked_hashes) != len(recovered_hashes):
-                self.logger.warning(f"Hash count mismatch: {len(cracked_hashes)} in potfile vs {len(recovered_hashes)} recovered indices")
+            # Get current recovery statistics
+            total_recovered = self.last_recovered_hashes[0] if self.last_recovered_hashes else 0
+            total_hashes = self.last_recovered_hashes[1] if self.last_recovered_hashes else 0
             
-            self.logger.info(f"Sending {len(cracked_hashes)} cracked hashes to control server")
+            self.logger.info(f"Sending {len(cracked_hashes)} cracked hashes to control server (newly recovered: {newly_recovered_count})")
             self.logger.debug(f"Potfile content preview: {potfile_content[:200]}...")
             
             # Handle webhook URLs properly
@@ -565,7 +566,9 @@ class HashcatWorker:
                 "timestamp": datetime.now().isoformat(),
                 "status": {"status": "sending_cracked_hashes"},  # Status indicating we're sending cracked hashes
                 "hashcatStatus": {
-                    "recovered_hashes": recovered_hashes,
+                    "newly_recovered_count": newly_recovered_count,
+                    "total_recovered": total_recovered,
+                    "total_hashes": total_hashes,
                     "cracked_hashes_content": potfile_content,
                     "cracked_hashes_count": len(cracked_hashes),
                     "potfile_path": str(potfile_path),
@@ -585,28 +588,42 @@ class HashcatWorker:
         except Exception as e:
             self.logger.error(f"Error sending cracked hashes: {str(e)}")
 
-    def check_for_new_recovered_hashes(self, hashcat_status_data: Dict[str, Any]) -> List[int]:
-        """Check if there are new recovered hashes and return the new ones."""
+    def check_for_new_recovered_hashes(self, hashcat_status_data: Dict[str, Any]) -> int:
+        """Check if there are new recovered hashes and return the count of newly recovered hashes.
+        
+        The recovered_hashes array from hashcat has format [recovered_count, total_count]
+        where recovered_count is the number of hashes recovered so far.
+        """
         current_recovered_hashes = hashcat_status_data.get("recovered_hashes", [])
         
-        # Find new hashes that weren't in the previous status
-        new_hashes = []
-        for hash_index in current_recovered_hashes:
-            if hash_index not in self.last_recovered_hashes:
-                new_hashes.append(hash_index)
+        # Validate the format - should be [recovered_count, total_count]
+        if not isinstance(current_recovered_hashes, list) or len(current_recovered_hashes) != 2:
+            self.logger.warning(f"Invalid recovered_hashes format: {current_recovered_hashes}")
+            return 0
+        
+        current_recovered_count = current_recovered_hashes[0]
+        total_hashes = current_recovered_hashes[1]
+        
+        # Get the previous recovered count
+        previous_recovered_count = self.last_recovered_hashes[0] if self.last_recovered_hashes else 0
+        
+        # Calculate how many new hashes were recovered
+        newly_recovered = current_recovered_count - previous_recovered_count
         
         # Update the last known recovered hashes
         self.last_recovered_hashes = current_recovered_hashes.copy()
         
-        # Log for debugging (only if there are recovered hashes)
-        if current_recovered_hashes:
-            self.logger.debug(f"Current recovered hashes: {current_recovered_hashes}, New hashes: {new_hashes}")
+        # Log for debugging
+        if newly_recovered > 0:
+            self.logger.info(f"New hashes recovered! Previous: {previous_recovered_count}, Current: {current_recovered_count}, New: {newly_recovered}, Total: {total_hashes}")
+        else:
+            self.logger.debug(f"Recovered hashes status - Previous: {previous_recovered_count}, Current: {current_recovered_count}, Total: {total_hashes}")
         
-        return new_hashes
+        return newly_recovered
     
     def reset_recovered_hashes_tracking(self):
         """Reset the recovered hashes tracking for a new campaign."""
-        self.last_recovered_hashes = []
+        self.last_recovered_hashes = [0, 0]  # [recovered_count, total_count] - start with 0 recovered
         self.logger.info("Reset recovered hashes tracking for new campaign")
 
 # Initialize FastAPI app
@@ -758,9 +775,13 @@ async def health_check():
 @app.get("/recovered-hashes")
 async def get_recovered_hashes():
     """Get current recovered hashes tracking status."""
+    total_recovered = worker.last_recovered_hashes[0] if worker.last_recovered_hashes else 0
+    total_hashes = worker.last_recovered_hashes[1] if worker.last_recovered_hashes else 0
+    
     return JSONResponse(content={
         "last_recovered_hashes": worker.last_recovered_hashes,
-        "total_recovered": len(worker.last_recovered_hashes),
+        "total_recovered": total_recovered,
+        "total_hashes": total_hashes,
         "timestamp": datetime.now().isoformat()
     })
 
