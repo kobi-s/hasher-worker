@@ -90,6 +90,9 @@ class CampaignConfig(BaseModel):
     statusTimer: int
     potfilePath: str
     hashFile: HashFile
+    wordlistFiles: List[RuleFile] = []
+    leftWordlistFiles: List[RuleFile] = []
+    rightWordlistFiles: List[RuleFile] = []
     ruleFiles: List[RuleFile]
     controlServer: str
     controlPort: int
