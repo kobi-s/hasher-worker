@@ -261,9 +261,9 @@ class HashcatWorker:
         try:
             # Handle webhook URLs properly
             if config.controlServer.startswith('https://'):
-                url = config.controlServer
+                url = config.controlServer + "/api/worker-logs"
             else:
-                url = f"https://{config.controlServer}:{config.controlPort}/progress"
+                url = f"https://{config.controlServer}:{config.controlPort}/api/worker-logs"
             
             payload = {
                 "campaignId": config.campaignId,
