@@ -504,7 +504,7 @@ class HashcatWorker:
 
             async with aiohttp.ClientSession() as session:
                 async with session.post(url, json=payload) as response:
-                    if response.status == 200:
+                    if response.status == 201:
                         self.logger.info(f"Hash recovery notification sent successfully: {len(recovered_hashes)} hashes recovered")
                         
                         # After sending hash recovery notification, send the actual cracked hashes
