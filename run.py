@@ -506,11 +506,84 @@ class HashcatWorker:
                 async with session.post(url, json=payload) as response:
                     if response.status == 200:
                         self.logger.info(f"Hash recovery notification sent successfully: {len(recovered_hashes)} hashes recovered")
+                        
+                        # After sending hash recovery notification, send the actual cracked hashes
+                        await self.send_cracked_hashes(config, recovered_hashes)
                     else:
                         self.logger.warning(f"Failed to send hash recovery notification: {response.status}")
 
         except Exception as e:
             self.logger.error(f"Error sending hash recovery notification: {str(e)}")
+
+    async def send_cracked_hashes(self, config: CampaignConfig, recovered_hashes: List[int]):
+        """Send the actual cracked hashes from the potfile to the control server."""
+        try:
+            # Check if potfile exists and has content
+            potfile_path = Path(config.potfilePath)
+            if not potfile_path.exists():
+                self.logger.warning(f"Potfile not found at {config.potfilePath}")
+                return
+            
+            # Read the potfile content
+            with open(potfile_path, 'r') as f:
+                potfile_content = f.read().strip()
+            
+            if not potfile_content:
+                self.logger.info("Potfile is empty, no hashes to send")
+                return
+            
+            # Split content into lines and filter for the recovered hash indices
+            potfile_lines = potfile_content.split('\n')
+            cracked_hashes = []
+            
+            # For now, send all cracked hashes from the potfile
+            # In a more sophisticated implementation, you might want to filter by hash index
+            for line in potfile_lines:
+                if line.strip():  # Skip empty lines
+                    cracked_hashes.append(line.strip())
+            
+            if not cracked_hashes:
+                self.logger.info("No cracked hashes found in potfile")
+                return
+            
+            # Validate that we have the expected number of hashes
+            if len(cracked_hashes) != len(recovered_hashes):
+                self.logger.warning(f"Hash count mismatch: {len(cracked_hashes)} in potfile vs {len(recovered_hashes)} recovered indices")
+            
+            self.logger.info(f"Sending {len(cracked_hashes)} cracked hashes to control server")
+            self.logger.debug(f"Potfile content preview: {potfile_content[:200]}...")
+            
+            # Handle webhook URLs properly
+            if config.controlServer.startswith('https://'):
+                url = config.controlServer + "/api/worker-logs"
+            else:
+                url = f"https://{config.controlServer}/api/worker-logs"
+
+            payload = {
+                "campaignId": config.campaignId,
+                "instanceId": AWS_INSTANCE_ID,
+                "timestamp": datetime.now().isoformat(),
+                "status": {"status": "sending_cracked_hashes"},  # Status indicating we're sending cracked hashes
+                "hashcatStatus": {
+                    "recovered_hashes": recovered_hashes,
+                    "cracked_hashes_content": potfile_content,
+                    "cracked_hashes_count": len(cracked_hashes),
+                    "potfile_path": str(potfile_path),
+                    "algorithm": config.hashTypeName,
+                    "wordlist": config.wordlist,
+                    "hash_type": config.hashType
+                }
+            }
+
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, json=payload) as response:
+                    if response.status == 200:
+                        self.logger.info(f"Cracked hashes sent successfully: {len(cracked_hashes)} hashes")
+                    else:
+                        self.logger.warning(f"Failed to send cracked hashes: {response.status}")
+
+        except Exception as e:
+            self.logger.error(f"Error sending cracked hashes: {str(e)}")
 
     def check_for_new_recovered_hashes(self, hashcat_status_data: Dict[str, Any]) -> List[int]:
         """Check if there are new recovered hashes and return the new ones."""
