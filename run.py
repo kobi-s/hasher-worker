@@ -52,6 +52,9 @@ def setup_logging():
 # Initialize logger
 logger = setup_logging()
 
+# Global config file path (will be set by command line arguments)
+CONFIG_FILE_PATH = "/home/ubuntu/campaigns/campaign-config.json"
+
 # Pydantic models for campaign configuration
 class HashFile(BaseModel):
     bucket: str
@@ -209,7 +212,7 @@ class HashcatWorker:
             if config.controlServer.startswith('https://'):
                 url = config.controlServer
             else:
-                url = f"http://{config.controlServer}:{config.controlPort}/status"
+                url = f"https://{config.controlServer}:{config.controlPort}/status"
             
             payload = {
                 "campaignId": config.campaignId,
@@ -472,15 +475,14 @@ async def get_logs():
 async def process_campaign():
     """Process campaign from configuration file."""
     try:
-        config_file = "campaign-config.json"
-        if not os.path.exists(config_file):
+        if not os.path.exists(CONFIG_FILE_PATH):
             raise HTTPException(
                 status_code=404,
-                detail=f"Configuration file {config_file} not found"
+                detail=f"Configuration file {CONFIG_FILE_PATH} not found"
             )
         
-        logger.info(f"Processing campaign from {config_file}")
-        result = await worker.process_campaign(config_file)
+        logger.info(f"Processing campaign from {CONFIG_FILE_PATH}")
+        result = await worker.process_campaign(CONFIG_FILE_PATH)
         
         return JSONResponse(content=result)
         
@@ -492,17 +494,16 @@ async def process_campaign():
 async def start_campaign():
     """Start campaign processing in background."""
     try:
-        config_file = "campaign-config.json"
-        if not os.path.exists(config_file):
+        if not os.path.exists(CONFIG_FILE_PATH):
             raise HTTPException(
                 status_code=404,
-                detail=f"Configuration file {config_file} not found"
+                detail=f"Configuration file {CONFIG_FILE_PATH} not found"
             )
         
-        logger.info(f"Starting campaign processing from {config_file}")
+        logger.info(f"Starting campaign processing from {CONFIG_FILE_PATH}")
         
         # Start campaign processing in background
-        asyncio.create_task(worker.process_campaign(config_file))
+        asyncio.create_task(worker.process_campaign(CONFIG_FILE_PATH))
         
         return JSONResponse(content={
             "status": "started",
@@ -538,6 +539,11 @@ def main():
         help="Port to bind the server to (default: 4444)"
     )
     parser.add_argument(
+        "--config",
+        default="/home/ubuntu/campaigns/campaign-config.json",
+        help="Path to campaign configuration file (default: /home/ubuntu/campaigns/campaign-config.json)"
+    )
+    parser.add_argument(
         "--reload",
         action="store_true",
         help="Enable auto-reload for development"
@@ -551,15 +557,21 @@ def main():
     args = parser.parse_args()
     
     logger.info(f"Starting Hashcat Worker Server on {args.host}:{args.port}")
+    logger.info(f"Config file path: {args.config}")
+    
+    # Store config path globally for API endpoints
+    global CONFIG_FILE_PATH
+    CONFIG_FILE_PATH = args.config
     
     # Auto-start campaign if requested
     if args.auto_start:
         async def auto_start_campaign():
-            await asyncio.sleep(10)  # Wait for server to start
-            config_file = "campaign-config.json"
-            if os.path.exists(config_file):
-                logger.info("Auto-starting campaign processing...")
-                await worker.process_campaign(config_file)
+            await asyncio.sleep(2)  # Wait for server to start
+            if os.path.exists(args.config):
+                logger.info(f"Auto-starting campaign processing from {args.config}")
+                await worker.process_campaign(args.config)
+            else:
+                logger.error(f"Config file not found: {args.config}")
         
         # Schedule auto-start
         asyncio.create_task(auto_start_campaign())
