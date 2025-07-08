@@ -297,6 +297,12 @@ class HashcatWorker:
     
     async def execute_hashcat(self, config: CampaignConfig, downloaded_files: Dict[str, str]) -> Dict[str, Any]:
         """Execute hashcat with the campaign configuration."""
+        def is_hashcat_status_json(line: str) -> bool:
+            try:
+                data = json.loads(line)
+                return isinstance(data, dict) and "status" in data
+            except Exception:
+                return False
         try:
             # Build hashcat command
             cmd = ["hashcat"]  # Assuming hashcat is in PATH
@@ -365,16 +371,11 @@ class HashcatWorker:
                         if line:
                             line_str = line.decode('utf-8').strip()
                             stdout_lines.append(line_str)
-                            
-                            # Check for JSON status lines
-                            if line_str.startswith('{"status"'):
-                                try:
-                                    status_data = json.loads(line_str)
-                                    await self.send_status_to_control_server(config, status_data)
-                                    # Also send as progress update
-                                    await self.send_progress_to_control_server(config, status_data)
-                                except json.JSONDecodeError:
-                                    self.logger.warning(f"Invalid JSON status line: {line_str}")
+                            # Only send valid hashcat status-json lines
+                            if is_hashcat_status_json(line_str):
+                                status_data = json.loads(line_str)
+                                await self.send_status_to_control_server(config, status_data)
+                                await self.send_progress_to_control_server(config, status_data)
                     except asyncio.TimeoutError:
                         pass
                 
