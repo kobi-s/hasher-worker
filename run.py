@@ -230,29 +230,31 @@ class HashcatWorker:
             
             return downloaded_files
         
-    async def send_status_to_control_server(self, config: CampaignConfig, status_data: Dict[str, Any]):
-        """Send status update to the control server."""
+    async def send_status_to_control_server(self, config: CampaignConfig, status_data: Dict[str, Any], hashcat_status: Dict[str, Any] = None):
+        """Send status update to the control server. The top-level 'status' is for the instance; hashcat status JSON is sent under 'hashcatStatus'."""
         try:
             # Handle webhook URLs properly
             if config.controlServer.startswith('https://'):
                 url = config.controlServer + "/api/worker-logs"
             else:
                 url = f"https://{config.controlServer}/api/worker-logs"
-            
+
             payload = {
                 "campaignId": config.campaignId,
                 "instanceId": AWS_INSTANCE_ID,
                 "timestamp": datetime.now().isoformat(),
-                "status": status_data
+                "status": status_data  # This is always the instance status (e.g., 'running', 'completed', etc.)
             }
-            
+            if hashcat_status is not None:
+                payload["hashcatStatus"] = hashcat_status
+
             async with aiohttp.ClientSession() as session:
                 async with session.post(url, json=payload) as response:
                     if response.status == 200:
                         self.logger.info(f"Status sent to control server: {status_data.get('status', 'unknown')}")
                     else:
                         self.logger.warning(f"Failed to send status to control server: {response.status}")
-                        
+
         except Exception as e:
             self.logger.error(f"Error sending status to control server: {str(e)}")
 
@@ -373,9 +375,13 @@ class HashcatWorker:
                             stdout_lines.append(line_str)
                             # Only send valid hashcat status-json lines
                             if is_hashcat_status_json(line_str):
-                                status_data = json.loads(line_str)
-                                await self.send_status_to_control_server(config, status_data)
-                                await self.send_progress_to_control_server(config, status_data)
+                                hashcat_status_data = json.loads(line_str)
+                                await self.send_status_to_control_server(
+                                    config,
+                                    {"status": "running"},  # Always use instance status here
+                                    hashcat_status=hashcat_status_data
+                                )
+                                await self.send_progress_to_control_server(config, hashcat_status_data)
                     except asyncio.TimeoutError:
                         pass
                 
