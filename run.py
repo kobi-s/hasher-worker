@@ -2,6 +2,13 @@
 """
 Hashcat Worker Server
 A Python server for executing hashcat processes with campaign configuration and status reporting.
+
+Features:
+- Downloads campaign files from URLs
+- Executes hashcat with various attack modes
+- Tracks and reports hash recovery progress
+- Sends real-time status updates to control server
+- Monitors recovered_hashes array for new hash discoveries
 """
 
 import os
@@ -154,6 +161,7 @@ class HashcatWorker:
         self.logger = logger
         self.current_process = None
         self.status_task = None
+        self.last_recovered_hashes = []  # Track the last known recovered hashes for change detection
         
     async def download_file(self, url: str, filename: str) -> str:
         """Download a file from URL to local storage."""
@@ -271,7 +279,8 @@ class HashcatWorker:
                 "campaignId": config.campaignId,
                 "instanceId": AWS_INSTANCE_ID,
                 "timestamp": datetime.now().isoformat(),
-                "progress": progress_data
+                "status": {"status": "running"},  # Always use instance status
+                "hashcatStatus": progress_data  # Hashcat progress data
             }
             
             async with aiohttp.ClientSession() as session:
@@ -376,12 +385,21 @@ class HashcatWorker:
                             # Only send valid hashcat status-json lines
                             if is_hashcat_status_json(line_str):
                                 hashcat_status_data = json.loads(line_str)
+                                
+                                # Check for new recovered hashes
+                                new_recovered_hashes = self.check_for_new_recovered_hashes(hashcat_status_data)
+                                
+                                # Send regular status update
                                 await self.send_status_to_control_server(
                                     config,
                                     {"status": "running"},  # Always use instance status here
                                     hashcat_status=hashcat_status_data
                                 )
                                 await self.send_progress_to_control_server(config, hashcat_status_data)
+                                
+                                # Send hash recovery notification if new hashes were found
+                                if new_recovered_hashes:
+                                    await self.send_hash_recovery_notification(config, new_recovered_hashes)
                     except asyncio.TimeoutError:
                         pass
                 
@@ -428,6 +446,9 @@ class HashcatWorker:
             # Read campaign configuration
             config = self.read_campaign_config(config_file)
             
+            # Reset recovered hashes tracking for new campaign
+            self.reset_recovered_hashes_tracking()
+            
             # Send initial status
             await self.send_status_to_control_server(config, {
                 "status": "starting",
@@ -459,6 +480,61 @@ class HashcatWorker:
                 'error': str(e),
                 'config_file': config_file
             }
+
+    async def send_hash_recovery_notification(self, config: CampaignConfig, recovered_hashes: List[int]):
+        """Send notification to control server about newly recovered hashes."""
+        try:
+            self.logger.info(f"New hashes recovered! Hash indices: {recovered_hashes}")
+            
+            # Handle webhook URLs properly
+            if config.controlServer.startswith('https://'):
+                url = config.controlServer + "/api/worker-logs"
+            else:
+                url = f"https://{config.controlServer}/api/worker-logs"
+
+            payload = {
+                "campaignId": config.campaignId,
+                "instanceId": AWS_INSTANCE_ID,
+                "timestamp": datetime.now().isoformat(),
+                "status": {"status": "hash_recovered"},  # Special status for hash recovery
+                "hashcatStatus": {
+                    "recovered_hashes": recovered_hashes
+                }
+            }
+
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, json=payload) as response:
+                    if response.status == 200:
+                        self.logger.info(f"Hash recovery notification sent successfully: {len(recovered_hashes)} hashes recovered")
+                    else:
+                        self.logger.warning(f"Failed to send hash recovery notification: {response.status}")
+
+        except Exception as e:
+            self.logger.error(f"Error sending hash recovery notification: {str(e)}")
+
+    def check_for_new_recovered_hashes(self, hashcat_status_data: Dict[str, Any]) -> List[int]:
+        """Check if there are new recovered hashes and return the new ones."""
+        current_recovered_hashes = hashcat_status_data.get("recovered_hashes", [])
+        
+        # Find new hashes that weren't in the previous status
+        new_hashes = []
+        for hash_index in current_recovered_hashes:
+            if hash_index not in self.last_recovered_hashes:
+                new_hashes.append(hash_index)
+        
+        # Update the last known recovered hashes
+        self.last_recovered_hashes = current_recovered_hashes.copy()
+        
+        # Log for debugging (only if there are recovered hashes)
+        if current_recovered_hashes:
+            self.logger.debug(f"Current recovered hashes: {current_recovered_hashes}, New hashes: {new_hashes}")
+        
+        return new_hashes
+    
+    def reset_recovered_hashes_tracking(self):
+        """Reset the recovered hashes tracking for a new campaign."""
+        self.last_recovered_hashes = []
+        self.logger.info("Reset recovered hashes tracking for new campaign")
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -604,6 +680,15 @@ async def health_check():
         "service": "Hashcat Worker Server",
         "instance_id": AWS_INSTANCE_ID,
         "process_running": worker.current_process is not None and worker.current_process.returncode is None
+    })
+
+@app.get("/recovered-hashes")
+async def get_recovered_hashes():
+    """Get current recovered hashes tracking status."""
+    return JSONResponse(content={
+        "last_recovered_hashes": worker.last_recovered_hashes,
+        "total_recovered": len(worker.last_recovered_hashes),
+        "timestamp": datetime.now().isoformat()
     })
 
 def main():
