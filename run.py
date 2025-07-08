@@ -409,7 +409,7 @@ app = FastAPI(
 worker = HashcatWorker()
 
 # Global variable to track if auto-start is requested
-AUTO_START_REQUESTED = False
+AUTO_START_REQUESTED = True
 
 @app.on_event("startup")
 async def startup_event():
