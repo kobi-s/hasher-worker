@@ -1,0 +1,38 @@
+{
+  "campaignId": "686c7019b3a60ab9daea12eb",
+  "name": "Test 5 (Copy) (Copy)",
+  "hashType": 1000,
+  "hashTypeName": "NTLM",
+  "attackMode": 0,
+  "wordlist": "686b26d324c299cc5f8aed37",
+  "increment": false,
+  "optimizedKernelEnable": true,
+  "statusTimer": 10,
+  "potfilePath": "cracked.txt",
+  "hashFile": {
+    "bucket": "",
+    "key": "",
+    "location": "https://hasher-dynamic-1751921096722-ewhrir.s3.us-east-1.amazonaws.com/hashes/hashes_1751924545272.txt"
+  },
+  "ruleFiles": [
+    {
+      "bucket": "hasher-static-1751921096722-2ubkhn",
+      "key": "rules/OneRuleToRuleThemStill_1751937049166.rule",
+      "location": "https://hasher-static-1751921096722-2ubkhn.s3.us-east-1.amazonaws.com/rules/OneRuleToRuleThemStill_1751937049166.rule",
+      "filename": "OneRuleToRuleThemStill.rule",
+      "_id": "686c7019b3a60ab9daea12ec"
+    }
+  ],
+  "controlServer": "localhost",
+  "controlPort": 8080,
+  "settings": {
+    "gpuModel": "v100",
+    "maxRuntime": 24,
+    "maxCost": 100,
+    "maxInstances": 4,
+    "region": "auto",
+    "useSpotInstances": true,
+    "debugOutput": false,
+    "enableBenchmark": false
+  }
+} 

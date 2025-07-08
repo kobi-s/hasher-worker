@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Hashcat Worker Server
-A Python server for executing hashcat processes with file downloads and logging.
+A Python server for executing hashcat processes with campaign configuration and status reporting.
 """
 
 import os
@@ -13,6 +13,7 @@ import aiohttp
 import subprocess
 import tempfile
 import shutil
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional, List
@@ -51,6 +52,46 @@ def setup_logging():
 # Initialize logger
 logger = setup_logging()
 
+# Pydantic models for campaign configuration
+class HashFile(BaseModel):
+    bucket: str
+    key: str
+    location: str
+
+class RuleFile(BaseModel):
+    bucket: str
+    key: str
+    location: str
+    filename: str
+    _id: str
+
+class Settings(BaseModel):
+    gpuModel: str
+    maxRuntime: int
+    maxCost: float
+    maxInstances: int
+    region: str
+    useSpotInstances: bool
+    debugOutput: bool
+    enableBenchmark: bool
+
+class CampaignConfig(BaseModel):
+    campaignId: str
+    name: str
+    hashType: int
+    hashTypeName: str
+    attackMode: int
+    wordlist: str
+    increment: bool
+    optimizedKernelEnable: bool
+    statusTimer: int
+    potfilePath: str
+    hashFile: HashFile
+    ruleFiles: List[RuleFile]
+    controlServer: str
+    controlPort: int
+    settings: Settings
+
 # Pydantic models for request/response
 class HelloRequest(BaseModel):
     message: str
@@ -61,26 +102,18 @@ class HelloResponse(BaseModel):
     message: str
     timestamp: str
 
-class HashcatProcess(BaseModel):
-    hashcat_binary: str
-    hash_file: str
-    wordlist_file: str
-    rule_file: Optional[str] = None
-    hash_type: str
-    additional_flags: List[str] = []
-    download_urls: List[str] = []
-    output_file: str
-
 @dataclass
 class HashcatConfig:
     """Configuration for hashcat execution."""
     binary_path: str
     hash_file: str
     wordlist_file: str
-    hash_type: str
+    hash_type: int
     output_file: str
-    rule_file: Optional[str] = None
+    attack_mode: int
+    rule_files: Optional[List[str]] = None
     additional_flags: List[str] = None
+    status_timer: int = 15
 
 class HashcatWorker:
     """Main worker class for handling hashcat operations."""
@@ -91,6 +124,8 @@ class HashcatWorker:
         self.download_dir = self.work_dir / "downloads"
         self.download_dir.mkdir(exist_ok=True)
         self.logger = logger
+        self.current_process = None
+        self.status_task = None
         
     async def download_file(self, url: str, filename: str) -> str:
         """Download a file from URL to local storage."""
@@ -111,84 +146,174 @@ class HashcatWorker:
             self.logger.error(f"Error downloading {url}: {str(e)}")
             raise
     
-    async def download_files(self, urls: List[str]) -> List[str]:
-        """Download multiple files from URLs."""
-        downloaded_files = []
-        for url in urls:
-            filename = url.split('/')[-1]
-            file_path = await self.download_file(url, filename)
-            downloaded_files.append(file_path)
+    async def download_campaign_files(self, config: CampaignConfig) -> Dict[str, str]:
+        """Download all files required for the campaign."""
+        downloaded_files = {}
+        
+        # Download hash file
+        hash_filename = f"hashes_{config.campaignId}.txt"
+        hash_path = await self.download_file(config.hashFile.location, hash_filename)
+        downloaded_files['hash_file'] = hash_path
+        
+        # Download wordlist (assuming it's a URL - you may need to adjust this)
+        # For now, we'll assume the wordlist is already available or needs to be downloaded separately
+        wordlist_filename = f"wordlist_{config.wordlist}.txt"
+        # You'll need to implement wordlist download logic based on your system
+        downloaded_files['wordlist_file'] = f"wordlists/{wordlist_filename}"  # Placeholder
+        
+        # Download rule files
+        rule_files = []
+        for rule_file in config.ruleFiles:
+            rule_path = await self.download_file(rule_file.location, rule_file.filename)
+            rule_files.append(rule_path)
+        downloaded_files['rule_files'] = rule_files
+        
         return downloaded_files
     
-    def read_hashcat_config(self, config_file: str) -> HashcatConfig:
-        """Read and parse hashcat process configuration from JSON file."""
+    def read_campaign_config(self, config_file: str) -> CampaignConfig:
+        """Read and parse campaign configuration from JSON file."""
         try:
             with open(config_file, 'r') as f:
                 config_data = json.load(f)
             
-            self.logger.info(f"Loaded hashcat configuration from {config_file}")
+            self.logger.info(f"Loaded campaign configuration from {config_file}")
             
-            # Validate required fields
-            required_fields = ['hashcat_binary', 'hash_file', 'wordlist_file', 'hash_type', 'output_file']
-            for field in required_fields:
-                if field not in config_data:
-                    raise ValueError(f"Missing required field: {field}")
-            
-            return HashcatConfig(
-                binary_path=config_data['hashcat_binary'],
-                hash_file=config_data['hash_file'],
-                wordlist_file=config_data['wordlist_file'],
-                hash_type=config_data['hash_type'],
-                output_file=config_data['output_file'],
-                rule_file=config_data.get('rule_file'),
-                additional_flags=config_data.get('additional_flags', [])
-            )
+            return CampaignConfig(**config_data)
         except Exception as e:
-            self.logger.error(f"Error reading hashcat config: {str(e)}")
+            self.logger.error(f"Error reading campaign config: {str(e)}")
             raise
     
-    async def execute_hashcat(self, config: HashcatConfig) -> Dict[str, Any]:
-        """Execute hashcat with the given configuration."""
+    async def send_status_to_control_server(self, config: CampaignConfig, status_data: Dict[str, Any]):
+        """Send status update to the control server."""
+        try:
+            url = f"http://{config.controlServer}:{config.controlPort}/status"
+            
+            payload = {
+                "campaignId": config.campaignId,
+                "timestamp": datetime.now().isoformat(),
+                "status": status_data
+            }
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, json=payload) as response:
+                    if response.status == 200:
+                        self.logger.info(f"Status sent to control server: {status_data.get('status', 'unknown')}")
+                    else:
+                        self.logger.warning(f"Failed to send status to control server: {response.status}")
+                        
+        except Exception as e:
+            self.logger.error(f"Error sending status to control server: {str(e)}")
+    
+    async def monitor_hashcat_process(self, config: CampaignConfig, process: asyncio.subprocess.Process):
+        """Monitor hashcat process and send status updates."""
+        try:
+            while process.returncode is None:
+                # Read status from hashcat's JSON output
+                if process.stdout:
+                    try:
+                        line = await asyncio.wait_for(process.stdout.readline(), timeout=1.0)
+                        if line:
+                            status_line = line.decode('utf-8').strip()
+                            if status_line.startswith('{"status"'):
+                                try:
+                                    status_data = json.loads(status_line)
+                                    await self.send_status_to_control_server(config, status_data)
+                                except json.JSONDecodeError:
+                                    self.logger.warning(f"Invalid JSON status line: {status_line}")
+                    except asyncio.TimeoutError:
+                        continue
+                
+                await asyncio.sleep(config.statusTimer)
+            
+            # Send final status
+            final_status = {
+                "status": "completed" if process.returncode == 0 else "failed",
+                "return_code": process.returncode
+            }
+            await self.send_status_to_control_server(config, final_status)
+            
+        except Exception as e:
+            self.logger.error(f"Error monitoring hashcat process: {str(e)}")
+    
+    async def execute_hashcat(self, config: CampaignConfig, downloaded_files: Dict[str, str]) -> Dict[str, Any]:
+        """Execute hashcat with the campaign configuration."""
         try:
             # Build hashcat command
-            cmd = [config.binary_path, '-m', config.hash_type]
+            cmd = ["hashcat"]  # Assuming hashcat is in PATH
             
-            # Add hash file
-            cmd.extend(['-a', '0', config.hash_file, config.wordlist_file])
+            # Add hash type
+            cmd.extend(['-m', str(config.hashType)])
             
-            # Add rule file if specified
-            if config.rule_file:
-                cmd.extend(['-r', config.rule_file])
+            # Add attack mode and files based on attack mode
+            if config.attackMode == 0:  # Straight attack
+                cmd.extend(['-a', '0', downloaded_files['hash_file'], downloaded_files['wordlist_file']])
+            elif config.attackMode == 1:  # Combination attack
+                cmd.extend(['-a', '1', downloaded_files['hash_file'], downloaded_files['wordlist_file'], downloaded_files.get('wordlist_file2', '')])
+            elif config.attackMode == 3:  # Brute-force attack
+                cmd.extend(['-a', '3', downloaded_files['hash_file'], '?a?a?a?a?a?a?a?a'])  # Example mask
+            elif config.attackMode == 6:  # Hybrid attack
+                cmd.extend(['-a', '6', downloaded_files['hash_file'], downloaded_files['wordlist_file'], '?a?a?a?a'])
+            elif config.attackMode == 7:  # Hybrid attack
+                cmd.extend(['-a', '7', downloaded_files['hash_file'], '?a?a?a?a', downloaded_files['wordlist_file']])
             
-            # Add additional flags
-            if config.additional_flags:
-                cmd.extend(config.additional_flags)
+            # Add rule files if specified
+            if downloaded_files.get('rule_files'):
+                for rule_file in downloaded_files['rule_files']:
+                    cmd.extend(['-r', rule_file])
             
-            # Add output file
-            cmd.extend(['-o', config.output_file])
+            # Add JSON output and status flags
+            cmd.extend([
+                '--status',
+                '--status-json',
+                f'--status-timer={config.statusTimer}',
+                '--potfile-disable',  # Disable potfile to avoid conflicts
+                '-o', config.potfilePath
+            ])
+            
+            # Add optimization flags
+            if config.optimizedKernelEnable:
+                cmd.append('--optimized-kernel-enable')
+            
+            # Add debug output if enabled
+            if config.settings.debugOutput:
+                cmd.append('--debug-mode=1')
             
             self.logger.info(f"Executing hashcat command: {' '.join(cmd)}")
             
             # Execute hashcat
-            process = await asyncio.create_subprocess_exec(
+            self.current_process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
             
-            stdout, stderr = await process.communicate()
+            # Start monitoring task
+            self.status_task = asyncio.create_task(
+                self.monitor_hashcat_process(config, self.current_process)
+            )
+            
+            # Wait for process to complete
+            stdout, stderr = await self.current_process.communicate()
+            
+            # Cancel monitoring task
+            if self.status_task:
+                self.status_task.cancel()
+                try:
+                    await self.status_task
+                except asyncio.CancelledError:
+                    pass
             
             result = {
-                'return_code': process.returncode,
+                'return_code': self.current_process.returncode,
                 'stdout': stdout.decode('utf-8') if stdout else '',
                 'stderr': stderr.decode('utf-8') if stderr else '',
                 'command': ' '.join(cmd)
             }
             
-            if process.returncode == 0:
+            if self.current_process.returncode == 0:
                 self.logger.info("Hashcat execution completed successfully")
             else:
-                self.logger.warning(f"Hashcat execution completed with return code {process.returncode}")
+                self.logger.warning(f"Hashcat execution completed with return code {self.current_process.returncode}")
             
             return result
             
@@ -196,27 +321,38 @@ class HashcatWorker:
             self.logger.error(f"Error executing hashcat: {str(e)}")
             raise
     
-    async def process_hashcat_job(self, config_file: str) -> Dict[str, Any]:
-        """Process a complete hashcat job including downloads and execution."""
+    async def process_campaign(self, config_file: str) -> Dict[str, Any]:
+        """Process a complete campaign including downloads and execution."""
         try:
-            # Read configuration
-            config = self.read_hashcat_config(config_file)
+            # Read campaign configuration
+            config = self.read_campaign_config(config_file)
             
-            # Download files if URLs are provided
-            if hasattr(config, 'download_urls') and config.download_urls:
-                await self.download_files(config.download_urls)
+            # Send initial status
+            await self.send_status_to_control_server(config, {
+                "status": "starting",
+                "message": "Campaign starting - downloading files"
+            })
+            
+            # Download files
+            downloaded_files = await self.download_campaign_files(config)
+            
+            # Send status after downloads
+            await self.send_status_to_control_server(config, {
+                "status": "files_downloaded",
+                "message": "All files downloaded successfully"
+            })
             
             # Execute hashcat
-            result = await self.execute_hashcat(config)
+            result = await self.execute_hashcat(config, downloaded_files)
             
             return {
                 'status': 'success',
-                'config_file': config_file,
+                'campaign_id': config.campaignId,
                 'execution_result': result
             }
             
         except Exception as e:
-            self.logger.error(f"Error processing hashcat job: {str(e)}")
+            self.logger.error(f"Error processing campaign: {str(e)}")
             return {
                 'status': 'error',
                 'error': str(e),
@@ -226,8 +362,8 @@ class HashcatWorker:
 # Initialize FastAPI app
 app = FastAPI(
     title="Hashcat Worker Server",
-    description="A professional Python server for executing hashcat processes",
-    version="1.0.0"
+    description="A professional Python server for executing hashcat processes with campaign configuration",
+    version="2.0.0"
 )
 
 # Initialize worker
@@ -244,6 +380,10 @@ async def startup_event():
 async def shutdown_event():
     """Application shutdown event."""
     logger.info("Hashcat Worker Server shutting down...")
+    if worker.current_process:
+        worker.current_process.terminate()
+    if worker.status_task:
+        worker.status_task.cancel()
 
 @app.post("/hello", response_model=HelloResponse)
 async def hello_endpoint(request: HelloRequest):
@@ -292,24 +432,49 @@ async def get_logs():
         logger.error(f"Error reading logs: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/process-hashcat")
-async def process_hashcat():
-    """Process hashcat job from configuration file."""
+@app.post("/process-campaign")
+async def process_campaign():
+    """Process campaign from configuration file."""
     try:
-        config_file = "hashcat-process.json"
+        config_file = "campaign-config.json"
         if not os.path.exists(config_file):
             raise HTTPException(
                 status_code=404,
                 detail=f"Configuration file {config_file} not found"
             )
         
-        logger.info(f"Processing hashcat job from {config_file}")
-        result = await worker.process_hashcat_job(config_file)
+        logger.info(f"Processing campaign from {config_file}")
+        result = await worker.process_campaign(config_file)
         
         return JSONResponse(content=result)
         
     except Exception as e:
-        logger.error(f"Error processing hashcat: {str(e)}")
+        logger.error(f"Error processing campaign: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/start-campaign")
+async def start_campaign():
+    """Start campaign processing in background."""
+    try:
+        config_file = "campaign-config.json"
+        if not os.path.exists(config_file):
+            raise HTTPException(
+                status_code=404,
+                detail=f"Configuration file {config_file} not found"
+            )
+        
+        logger.info(f"Starting campaign processing from {config_file}")
+        
+        # Start campaign processing in background
+        asyncio.create_task(worker.process_campaign(config_file))
+        
+        return JSONResponse(content={
+            "status": "started",
+            "message": "Campaign processing started in background"
+        })
+        
+    except Exception as e:
+        logger.error(f"Error starting campaign: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/health")
@@ -318,7 +483,8 @@ async def health_check():
     return JSONResponse(content={
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
-        "service": "Hashcat Worker Server"
+        "service": "Hashcat Worker Server",
+        "process_running": worker.current_process is not None and worker.current_process.returncode is None
     })
 
 def main():
@@ -340,10 +506,27 @@ def main():
         action="store_true",
         help="Enable auto-reload for development"
     )
+    parser.add_argument(
+        "--auto-start",
+        action="store_true",
+        help="Automatically start campaign processing on startup"
+    )
     
     args = parser.parse_args()
     
     logger.info(f"Starting Hashcat Worker Server on {args.host}:{args.port}")
+    
+    # Auto-start campaign if requested
+    if args.auto_start:
+        async def auto_start_campaign():
+            await asyncio.sleep(2)  # Wait for server to start
+            config_file = "campaign-config.json"
+            if os.path.exists(config_file):
+                logger.info("Auto-starting campaign processing...")
+                await worker.process_campaign(config_file)
+        
+        # Schedule auto-start
+        asyncio.create_task(auto_start_campaign())
     
     uvicorn.run(
         "run:app",
