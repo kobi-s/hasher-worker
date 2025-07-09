@@ -63,27 +63,44 @@ logger = setup_logging()
 # Global config file path (will be set by command line arguments)
 CONFIG_FILE_PATH = "/home/ubuntu/campaigns/campaign-config.json"
 
-# Global variable to store AWS instance ID
+# Global variables to store AWS metadata
 AWS_INSTANCE_ID = None
+AWS_REGION = None
 
-async def fetch_aws_instance_id():
-    """Fetch AWS instance ID from metadata service."""
-    global AWS_INSTANCE_ID
+async def fetch_aws_metadata():
+    """Fetch AWS instance ID and region from metadata service."""
+    global AWS_INSTANCE_ID, AWS_REGION
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get('http://169.254.169.254/latest/meta-data/instance-id') as response:
-                if response.status == 200:
-                    AWS_INSTANCE_ID = await response.text()
-                    logger.info(f"Fetched AWS instance ID: {AWS_INSTANCE_ID}")
-                    return AWS_INSTANCE_ID
-                else:
-                    logger.warning(f"Failed to fetch AWS instance ID: {response.status}")
-                    AWS_INSTANCE_ID = "unknown"
-                    return AWS_INSTANCE_ID
+            # Fetch instance ID and region concurrently
+            instance_id_task = session.get('http://169.254.169.254/latest/meta-data/instance-id')
+            region_task = session.get('http://169.254.169.254/latest/meta-data/placement/region')
+            
+            instance_id_response, region_response = await asyncio.gather(instance_id_task, region_task)
+            
+            # Process instance ID
+            if instance_id_response.status == 200:
+                AWS_INSTANCE_ID = await instance_id_response.text()
+                logger.info(f"Fetched AWS instance ID: {AWS_INSTANCE_ID}")
+            else:
+                logger.warning(f"Failed to fetch AWS instance ID: {instance_id_response.status}")
+                AWS_INSTANCE_ID = "unknown"
+            
+            # Process region
+            if region_response.status == 200:
+                AWS_REGION = await region_response.text()
+                logger.info(f"Fetched AWS region: {AWS_REGION}")
+            else:
+                logger.warning(f"Failed to fetch AWS region: {region_response.status}")
+                AWS_REGION = "unknown"
+            
+            return AWS_INSTANCE_ID, AWS_REGION
+            
     except Exception as e:
-        logger.warning(f"Error fetching AWS instance ID: {str(e)}")
+        logger.warning(f"Error fetching AWS metadata: {str(e)}")
         AWS_INSTANCE_ID = "unknown"
-        return AWS_INSTANCE_ID
+        AWS_REGION = "unknown"
+        return AWS_INSTANCE_ID, AWS_REGION
 
 # Pydantic models for campaign configuration
 class HashFile(BaseModel):
@@ -251,6 +268,7 @@ class HashcatWorker:
             payload = {
                 "campaignId": config.campaignId,
                 "instanceId": AWS_INSTANCE_ID,
+                "region": AWS_REGION,
                 "timestamp": datetime.now().isoformat(),
                 "status": status_data  # This is always the instance status (e.g., 'running', 'completed', etc.)
             }
@@ -279,6 +297,7 @@ class HashcatWorker:
             payload = {
                 "campaignId": config.campaignId,
                 "instanceId": AWS_INSTANCE_ID,
+                "region": AWS_REGION,
                 "timestamp": datetime.now().isoformat(),
                 "status": {"status": "running"},  # Always use instance status
                 "hashcatStatus": progress_data  # Hashcat progress data
@@ -511,6 +530,7 @@ class HashcatWorker:
             payload = {
                 "campaignId": config.campaignId,
                 "instanceId": AWS_INSTANCE_ID,
+                "region": AWS_REGION,
                 "timestamp": datetime.now().isoformat(),
                 "status": {"status": "hash_recovered"},  # Special status for hash recovery
                 "hashcatStatus": {
@@ -581,6 +601,7 @@ class HashcatWorker:
             payload = {
                 "campaignId": config.campaignId,
                 "instanceId": AWS_INSTANCE_ID,
+                "region": AWS_REGION,
                 "timestamp": datetime.now().isoformat(),
                 "status": {"status": "sending_cracked_hashes"},
                 "hashcatStatus": {
@@ -654,6 +675,7 @@ class HashcatWorker:
             payload = {
                 "campaignId": config.campaignId,
                 "instanceId": AWS_INSTANCE_ID,
+                "region": AWS_REGION,
                 "timestamp": datetime.now().isoformat(),
                 "status": {"status": "completed"},
                 "hashcatStatus": {
@@ -735,8 +757,8 @@ async def startup_event():
     logger.info(f"Working directory: {worker.work_dir}")
     logger.info(f"Download directory: {worker.download_dir}")
     
-    # Fetch AWS instance ID
-    await fetch_aws_instance_id()
+    # Fetch AWS metadata
+    await fetch_aws_metadata()
     
     # Auto-start campaign if requested
     if AUTO_START_REQUESTED:
@@ -858,6 +880,7 @@ async def health_check():
         "timestamp": datetime.now().isoformat(),
         "service": "Hashcat Worker Server",
         "instance_id": AWS_INSTANCE_ID,
+        "region": AWS_REGION,
         "process_running": worker.current_process is not None and worker.current_process.returncode is None
     })
 
