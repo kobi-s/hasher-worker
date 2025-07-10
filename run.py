@@ -219,11 +219,17 @@ class HashcatWorker:
             # Use the first wordlist file as the main wordlist
             if wordlist_files:
                 downloaded_files['wordlist_file'] = wordlist_files[0]
-            else:
+            elif config.wordlist and config.wordlist != "None":
                 # Fallback to the wordlist URL if no wordlistFiles are provided
                 wordlist_filename = f"wordlist_{config.campaignId}.txt"
                 wordlist_path = await self.download_file(config.wordlist, wordlist_filename)
                 downloaded_files['wordlist_file'] = wordlist_path
+            elif config.attackMode == 9:
+                # For association attack (mode 9), we don't need a wordlist file
+                self.logger.info("Attack mode 9 (association) - no wordlist file needed")
+            else:
+                # For other attack modes, we need a wordlist but none was provided
+                raise Exception(f"Wordlist is required for attack mode {config.attackMode} but none was provided")
             
             # Download left wordlist files (for combination attack)
             left_wordlist_files = []
@@ -256,10 +262,17 @@ class HashcatWorker:
             downloaded_files['rule_files'] = rule_files
             
             # Download association file if present
+            self.logger.info(f"Checking for association file: {getattr(config, 'associationFile', None)}")
             if getattr(config, 'associationFile', None) and config.associationFile.get('location'):
                 assoc_filename = config.associationFile.get('filename') or f"association_{config.campaignId}.txt"
+                self.logger.info(f"Downloading association file from: {config.associationFile['location']}")
                 assoc_path = await self.download_file(config.associationFile['location'], assoc_filename)
                 downloaded_files['association_file'] = assoc_path
+                self.logger.info(f"Successfully downloaded association file to: {assoc_path}")
+            else:
+                self.logger.warning("No association file found in config")
+                if config.attackMode == 9:
+                    self.logger.error("Association file is required for attack mode 9 but not found in config")
             
             return downloaded_files
         
@@ -327,6 +340,11 @@ class HashcatWorker:
                 config_data = json.load(f)
             
             self.logger.info(f"Loaded campaign configuration from {config_file}")
+            self.logger.info(f"Campaign config keys: {list(config_data.keys())}")
+            if 'associationFile' in config_data:
+                self.logger.info(f"Association file in config: {config_data['associationFile']}")
+            else:
+                self.logger.warning("No associationFile key found in campaign config")
             
             return CampaignConfig(**config_data)
         except Exception as e:
