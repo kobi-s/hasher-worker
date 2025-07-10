@@ -361,6 +361,8 @@ class HashcatWorker:
                 cmd.extend(['-a', '7', downloaded_files['hash_file'], '?a?a?a?a', downloaded_files['wordlist_file']])
             elif config.attackMode == 9:  # Association attack
                 # hashcat -a 9 <hash_file> <association_file> [other args]
+                if 'association_file' not in downloaded_files:
+                    raise Exception("Association file is required for attack mode 9 but was not found in downloaded files")
                 cmd.extend(['-a', '9', downloaded_files['hash_file'], downloaded_files['association_file']])
             
             # Add rule files if specified
