@@ -131,7 +131,7 @@ class CampaignConfig(BaseModel):
     hashType: int
     hashTypeName: str
     attackMode: int
-    wordlist: str
+    wordlist: Optional[str] = None  # optional
     increment: bool
     optimizedKernelEnable: bool
     statusTimer: int
