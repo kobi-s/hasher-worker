@@ -144,6 +144,7 @@ class CampaignConfig(BaseModel):
     controlServer: str
     controlPort: int
     settings: Settings
+    associationFile: Optional[dict] = None  # <-- add this
 
 # Pydantic models for request/response
 class HelloRequest(BaseModel):
@@ -254,6 +255,12 @@ class HashcatWorker:
                 rule_files.append(rule_path)
             downloaded_files['rule_files'] = rule_files
             
+            # Download association file if present
+            if getattr(config, 'associationFile', None) and config.associationFile.get('location'):
+                assoc_filename = config.associationFile.get('filename') or f"association_{config.campaignId}.txt"
+                assoc_path = await self.download_file(config.associationFile['location'], assoc_filename)
+                downloaded_files['association_file'] = assoc_path
+            
             return downloaded_files
         
     async def send_status_to_control_server(self, config: CampaignConfig, status_data: Dict[str, Any], hashcat_status: Dict[str, Any] = None):
@@ -352,6 +359,9 @@ class HashcatWorker:
                 cmd.extend(['-a', '6', downloaded_files['hash_file'], downloaded_files['wordlist_file'], '?a?a?a?a'])
             elif config.attackMode == 7:  # Hybrid attack
                 cmd.extend(['-a', '7', downloaded_files['hash_file'], '?a?a?a?a', downloaded_files['wordlist_file']])
+            elif config.attackMode == 9:  # Association attack
+                # hashcat -a 9 <hash_file> <association_file> [other args]
+                cmd.extend(['-a', '9', downloaded_files['hash_file'], downloaded_files['association_file']])
             
             # Add rule files if specified
             if downloaded_files.get('rule_files'):
